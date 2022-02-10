@@ -1,0 +1,126 @@
+
+*-------------------------------------------------------------------------------
+*Start analyses with inverse probability of treatment propensity-score weighting 
+*-------------------------------------------------------------------------------
+*----------------------------------------------------+
+
+* Start Calculating IPTW andChecking IPTW Assumptions
+*----------------------------------------------------+
+
+use COLCHICINE_DATASET, clear
+
+#delimit ;
+global ps_ivar  "c.age i.SEX 
+	i.grp_severity1 i.grp_severity2 i.grp_severity3 i.grp_severity4 
+	i.hist_ckd  i.hist_diabetes i.hist_cancer i.hist_hypertension 
+	i.hist_dyspnea i.hist_cough i.hist_arhtrmyalg i.hist_diarrhea 
+	i.hist_antibiotics_done i.antiviral i.hydroxyxhloroquine 
+	i.steroids i.toci_yes";
+#delimit cr
+
+#delimit ;
+global ps_nivar  "age SEX 
+	grp_severity1 grp_severity2 grp_severity3 grp_severity4 
+	hist_ckd  hist_diabetes hist_cancer hist_hypertension 
+	hist_dyspnea hist_cough hist_arhtrmyalg hist_diarrhea 
+	hist_antibiotics_done antiviral hydroxyxhloroquine 
+	steroids toci_yes";
+#delimit cr
+
+logit colch_tp $ps_ivar 
+
+* calculate stabilized inverse probability of treatment weights 
+* (Austin Stat Med 2016; 35: 5642)
+
+predict pr1, pr
+gen pr0 = 1 - pr1
+qui summ pr1, meanonly
+local mpr1 = r(mean)
+qui summ pr0, meanonly
+local mpr0 = r(mean)
+gen stab_ipw = .
+replace stab_ipw = `mpr1' * 1/pr1 if colch_tp ==1
+replace stab_ipw = `mpr0' * 1/pr0 if colch_tp ==0
+drop if missing(stab_ipw)
+
+// check common support
+summ stab_ipw if colch_tp == 0
+tw kdensity stab_ipw if colch_tp == 0, lcolor(black) lpattern(solid) || ///
+   kdensity stab_ipw if colch_tp == 1, lcolor(maroon) lpattern(dash) || ///
+   , ///
+   ytitle("Density") ylabel(, angle(horizontal) format(%3.1f)) ///
+   xlabel(, forma(%3.1f)) ///
+   xtitle("Stabilized inverse probability of treatment weights") ///
+   legend(pos(2) ring(0) rows(2) order(1 "Control" 2 "Colchicine")) ///
+   scheme(s1mono)
+   
+   
+/// Start computation of Standardized differences
+teffects ipw  (death) (colch_tp $ps_ivar, logit)
+tebalance summarize
+
+
+foreach var of varlist ///
+	$ps_nivar  {
+		di _newline(3) _col(8) in gr "--------------------> Standardized difference of var: `var'"
+		qui summ `var' [aw = stab_ipw] if colch_tp == 0
+		local m0 = r(mean)
+		local v0 = r(Var)
+		qui summ `var' [aw = stab_ipw] if colch_tp == 1
+		local m1 = r(mean)
+		local v1 = r(Var)
+		local std = (`m0' - `m1') / sqrt((`v0' + `v1')/2)
+		di _col(8) in ye %3.1f `std' * 100 " %" 
+		 }
+		 
+/// End computation of standardized differences
+
+*-----------------------------+
+* End Check IPTW Assumptions
+*-----------------------------+
+
+*---------------------------------------------------------------+
+* Start Survival Analysis (21-day mortality)
+*---------------------------------------------------------------+
+
+stset FOLLOW_DATE [pw = stab_ipw], id(id) origin(admission_date) fail(death == 1) ///
+ exit(time admission_date + 21)
+stcox colch_tp , cluster(id)
+qui test _b[colch_tp] = 0
+local pval  = r(p) 
+local spval = string(`pval', "%4.3f")
+
+
+#delimit ;
+global kmstuff  "risktable(, title("N at risk", size(*.7))) 
+	  risktable(, color("black") group(#1) size(*.7)) 
+	  risktable(, color("maroon")  group(#2) size(*.7))  
+	  risktable(, rowtitle("Colchicine: No ") group(#1) size(*.7)) 
+	  risktable(, rowtitle("Colchicine: Yes") group(#2) size(*.7))
+      plot1opts(lcolor("black") lwidth(*1.0) lpattern(solid)) 
+	  plot2opts(lcolor("maroon")  lwidth(*1.0) lpattern(dash))  
+	  legend(cols(1) position(11) rows(3) ring(0) size(*.7)
+	  lstyle(none) 
+	  order(1 "Colchicine: No" 2 
+	  "Colchicine: Yes"))   
+	  ysc(range(.75 1)) 
+	  ylab(.25 "25" .5 "50" .75 "75" 1 "100", 
+	  angle(horizontal) labsize(*.7) grid ) 
+	  xsc(titlegap(5)) xlab(0(1)21, format(%3.0f) labsize(*.7))";
+#delimit cr
+
+
+sts graph, by(colch_tp)  failure ///
+ $kmstuff  risktable(, format(%3.0f)) ///
+	xtitle("Days") ///
+	ytitle("Cumulative Mortality (%)") scheme(s1mono) ///
+	title("Time to Death (Propensity Score Analysis)", size(*0.8) ///
+	box bexpand bmargin(0 0 0 0)) ///
+	text(.7 17 "P value = `spval'")
+graph export colch_propensity_score_iptw_death_only.png, replace
+
+
+*-------------------------------------------------------------------+
+* End Survival Analysis (21-day mortality)
+*-------------------------------------------------------------------+
+
